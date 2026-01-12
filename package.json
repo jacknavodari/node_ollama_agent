@@ -1,0 +1,14 @@
+{
+  "name": "ollama-node-agent",
+  "version": "1.1.0",
+  "description": "Standalone Ollama Node Agent",
+  "main": "agent.js",
+  "bin": "agent.js",
+  "pkg": {
+    "targets": [
+      "node18-win-x64"
+    ]
+  },
+  "author": "",
+  "license": "ISC"
+}
