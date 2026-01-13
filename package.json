@@ -4,6 +4,10 @@
   "description": "Standalone Ollama Node Agent",
   "main": "agent.js",
   "bin": "agent.js",
+  "scripts": {
+    "start": "node agent.js",
+    "build": "pkg . --output ollama-node-agent.exe"
+  },
   "pkg": {
     "targets": [
       "node18-win-x64"

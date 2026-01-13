@@ -1,16 +1,30 @@
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
-const readline = require('readline');
+const readline = require('readline/promises');
 const http = require('http');
 
-const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout
-});
+let rl;
 
-let MODEL = 'qwen2.5-coder:latest';
+let MODEL = 'hf.co/mradermacher/Qwen3-Coder-REAP-25B-A3B-GGUF:Q2_K';
 const MSG_HISTORY = [];
+const CONFIG_PATH = path.join(process.cwd(), 'config.json');
+let AVAILABLE_MODELS = [];
+
+function loadConfig() {
+    try {
+        if (fs.existsSync(CONFIG_PATH)) {
+            const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+            if (config.model) MODEL = config.model;
+        }
+    } catch (e) { console.error("Failed to load config:", e.message); }
+}
+
+function saveConfig() {
+    try {
+        fs.writeFileSync(CONFIG_PATH, JSON.stringify({ model: MODEL }, null, 2));
+    } catch (e) { console.error("Failed to save config:", e.message); }
+}
 
 const SYSTEM_PROMPT = `You are "AI Agent", a world-class autonomous Senior Software Engineer and "Coding Doctor".
 You possess full administrative access to this system via your internal "Nodes".
@@ -45,7 +59,7 @@ function ollamaRequest(endpoint, payload = {}, method = 'POST') {
     return new Promise((resolve, reject) => {
         const data = method === 'POST' ? JSON.stringify(payload) : '';
         const options = {
-            hostname: 'localhost', port: 11434, path: endpoint, method: method,
+            hostname: '127.0.0.1', port: 11434, path: endpoint, method: method,
             headers: { 'Content-Type': 'application/json' }
         };
         if (method === 'POST') options.headers['Content-Length'] = Buffer.byteLength(data);
@@ -125,57 +139,95 @@ const C = {
     white: "\x1b[97m"
 };
 
+async function loop() {
+    while (true) {
+        const input = await rl.question(`\n${C.bright}${C.magenta}User:${C.reset} `);
+        if (input === 'exit') {
+            rl.close();
+            process.exit();
+        }
+        if (input.startsWith('/model')) {
+            const arg = input.split(' ')[1];
+            if (!arg) {
+                console.log(`\n${C.bright}${C.cyan}Available Models:${C.reset}`);
+                AVAILABLE_MODELS.forEach((m, i) => console.log(`${C.green}[${i + 1}]${C.reset} ${m}`));
+                continue;
+            }
+            const idx = parseInt(arg) - 1;
+            if (!isNaN(idx) && AVAILABLE_MODELS[idx]) {
+                MODEL = AVAILABLE_MODELS[idx];
+            } else {
+                MODEL = arg;
+            }
+            saveConfig();
+            console.log(`${C.blue}Switched model to:${C.reset} ${C.bright}${MODEL}${C.reset}`);
+            continue;
+        }
+
+        MSG_HISTORY.push({ role: 'user', content: input });
+        let active = true;
+        while (active) {
+            process.stdout.write(`${C.yellow}Thinking...${C.reset} `);
+            try {
+                const res = await ollamaRequest('/api/chat', { model: MODEL, messages: MSG_HISTORY, stream: false });
+                process.stdout.write("\r\x1b[K"); // Clear Thinking... line
+                const content = res.message.content;
+                const tools = parseToolCalls(content);
+
+                if (tools.length) {
+                    MSG_HISTORY.push({ role: 'assistant', content });
+                    for (const t of tools) {
+                        console.log(`${C.blue}[Executing]${C.reset} ${C.bright}${t.tool}${C.reset}:${C.cyan}${t.args.action || 'cmd'}${C.reset}`);
+                        const out = await TOOLS[t.tool](t.args);
+                        const statusColor = out.status === 'success' ? C.green : C.red;
+                        console.log(`${C.blue}[Result]${C.reset} ${statusColor}${out.status}${C.reset}`);
+                        MSG_HISTORY.push({ role: 'user', content: `Tool Output (${t.tool}): ${JSON.stringify(out)}` });
+                    }
+                } else {
+                    console.log(`\n${C.bright}${C.green}AI:${C.reset}\n${content}`);
+                    MSG_HISTORY.push({ role: 'assistant', content });
+                    active = false;
+                }
+            } catch (e) { console.log(`\n${C.red}Error:${C.reset} ${e.message}`); active = false; }
+        }
+    }
+}
+
 async function main() {
     console.log(`\n${C.bright}${C.cyan}--- Standalone AI Coding Agent (v1.3 - Colorful Edition) ---${C.reset}`);
+    loadConfig();
     try {
         const res = await ollamaRequest('/api/tags', {}, 'GET');
-        const models = res.models ? res.models.map(m => m.name) : [];
-        if (models.length) {
-            console.log(`${C.white}Found Models:${C.reset} ${models.join(', ')}`);
-            MODEL = models.find(m => m.includes('coder')) || models[0];
-            console.log(`${C.green}Selected Model:${C.reset} ${C.bright}${MODEL}${C.reset}`);
+        AVAILABLE_MODELS = res.models ? res.models.map(m => m.name) : [];
+        if (AVAILABLE_MODELS.length) {
+            console.log(`\n${C.bright}${C.cyan}Available Models:${C.reset}`);
+            AVAILABLE_MODELS.forEach((m, i) => {
+                const marker = m === MODEL ? `${C.yellow}*${C.reset}` : ' ';
+                console.log(`${C.green}[${i + 1}]${C.reset}${marker} ${m}`);
+            });
+
+            if (!AVAILABLE_MODELS.includes(MODEL)) {
+                const defaultModel = AVAILABLE_MODELS.find(m => m.includes('coder')) || AVAILABLE_MODELS[0];
+                if (!MODEL || MODEL === 'hf.co/mradermacher/Qwen3-Coder-REAP-25B-A3B-GGUF:Q2_K') {
+                    MODEL = defaultModel;
+                }
+            }
+            console.log(`\n${C.green}Selected Model:${C.reset} ${C.bright}${MODEL}${C.reset}`);
+            console.log(`${C.white}Tip: Use ${C.cyan}/model <number>${C.white} to switch models.${C.reset}`);
         }
-    } catch (e) { console.log(`${C.red}Ollama not detected on localhost:11434${C.reset}`); }
+    } catch (e) {
+        console.log(`${C.red}Ollama not detected on 127.0.0.1:11434${C.reset}`);
+        console.error(e);
+    }
 
-    const loop = () => {
-        rl.question(`\n${C.bright}${C.magenta}User:${C.reset} `, async (input) => {
-            if (input === 'exit') process.exit();
-            if (input.startsWith('/model ')) {
-                MODEL = input.split(' ')[1];
-                console.log(`${C.blue}Switched model to:${C.reset} ${C.bright}${MODEL}${C.reset}`);
-                loop();
-                return;
-            }
+    rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout
+    });
 
-            MSG_HISTORY.push({ role: 'user', content: input });
-            let active = true;
-            while (active) {
-                process.stdout.write(`${C.yellow}Thinking...${C.reset} `);
-                try {
-                    const res = await ollamaRequest('/api/chat', { model: MODEL, messages: MSG_HISTORY, stream: false });
-                    process.stdout.write("\r\x1b[K"); // Clear Thinking... line
-                    const content = res.message.content;
-                    const tools = parseToolCalls(content);
-
-                    if (tools.length) {
-                        MSG_HISTORY.push({ role: 'assistant', content });
-                        for (const t of tools) {
-                            console.log(`${C.blue}[Executing]${C.reset} ${C.bright}${t.tool}${C.reset}:${C.cyan}${t.args.action || 'cmd'}${C.reset}`);
-                            const out = await TOOLS[t.tool](t.args);
-                            const statusColor = out.status === 'success' ? C.green : C.red;
-                            console.log(`${C.blue}[Result]${C.reset} ${statusColor}${out.status}${C.reset}`);
-                            MSG_HISTORY.push({ role: 'user', content: `Tool Output (${t.tool}): ${JSON.stringify(out)}` });
-                        }
-                    } else {
-                        console.log(`\n${C.bright}${C.green}AI:${C.reset}\n${content}`);
-                        MSG_HISTORY.push({ role: 'assistant', content });
-                        active = false;
-                    }
-                } catch (e) { console.log(`\n${C.red}Error:${C.reset} ${e.message}`); active = false; }
-            }
-            loop();
-        });
-    };
-    loop();
+    await loop();
 }
-main();
+main().catch(e => {
+    console.error("Unhandled rejection in main:", e);
+    process.exit(1);
+});
